@@ -6,8 +6,10 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 
+import pyqtgraph as pg
 import pyvisa
 from PySide6 import QtCore, QtWidgets
+
 
 # ---------------------------- Config models ----------------------------
 
@@ -20,11 +22,12 @@ class RunConfig:
     stop: float = 0.0
     step: float = 0.0
     dwell_s: float = 0.2
-    duration_s: float = 5.0
+    duration_s: float = 0.0       # 0 => run until Stop for HOLD modes
     sample_period_s: float = 0.2
     compliance: float = 0.001     # A for V-source modes, V for I-source modes
     nplc: float = 1.0
     autorange: bool = True
+
 
 # ---------------------------- VISA helpers ----------------------------
 
@@ -39,6 +42,7 @@ def open_resource(resource: str, timeout_ms: int = 10000):
     inst.write_termination = "\n"
     inst.read_termination = "\n"
     return inst
+
 
 # ---------------------------- Instrument wrappers ----------------------------
 
@@ -79,28 +83,21 @@ class KeithleyBase:
         raise NotImplementedError
 
     def shutdown_safe(self):
-        # override if you want ramp-to-zero; default just output off
         self.output_off()
 
+
 class Keithley2450(KeithleyBase):
-    """
-    Uses TSP / SCPI-ish commands for 2450.
-    Many 2450s accept both SCPI-style :SOUR and TSP "smu." commands.
-    We'll use SCPI-ish ones where possible.
-    """
     def reset(self):
         self.write("*RST")
         self.write("*CLS")
 
     def output_on(self):
-        # 2450: OUTP ON
         self.write("OUTP ON")
 
     def output_off(self):
         self.write("OUTP OFF")
 
     def set_nplc_current(self, nplc: float):
-        # measure current NPLC
         self.write(f"SENS:CURR:NPLC {nplc}")
 
     def set_nplc_voltage(self, nplc: float):
@@ -109,56 +106,44 @@ class Keithley2450(KeithleyBase):
     def source_voltage_measure_current(self, v: float, i_limit: float, autorange=True):
         self.write("SOUR:FUNC VOLT")
         self.write(f"SOUR:VOLT {v}")
-        self.write(f"SENS:CURR:PROT {i_limit}")  # current compliance
+        self.write(f"SENS:CURR:PROT {i_limit}")
         self.write("SENS:FUNC 'CURR'")
-        if autorange:
-            self.write("SENS:CURR:RANG:AUTO ON")
-        else:
-            self.write("SENS:CURR:RANG:AUTO OFF")
+        self.write("SENS:CURR:RANG:AUTO ON" if autorange else "SENS:CURR:RANG:AUTO OFF")
 
     def source_current_measure_voltage(self, i: float, v_limit: float, autorange=True):
         self.write("SOUR:FUNC CURR")
         self.write(f"SOUR:CURR {i}")
-        self.write(f"SENS:VOLT:PROT {v_limit}")  # voltage compliance
+        self.write(f"SENS:VOLT:PROT {v_limit}")
         self.write("SENS:FUNC 'VOLT'")
-        if autorange:
-            self.write("SENS:VOLT:RANG:AUTO ON")
-        else:
-            self.write("SENS:VOLT:RANG:AUTO OFF")
+        self.write("SENS:VOLT:RANG:AUTO ON" if autorange else "SENS:VOLT:RANG:AUTO OFF")
 
     def measure_current(self) -> float:
-        # READ? returns reading in selected function
         return float(self.query("READ?").strip())
 
     def measure_voltage(self) -> float:
         return float(self.query("READ?").strip())
 
+
 class Keithley6487(KeithleyBase):
-    """
-    6487 picoammeter with voltage source.
-    We'll use common SCPI commands used by 6487 family.
-    """
     def reset(self):
         self.write("*RST")
         self.write("*CLS")
 
     def output_on(self):
-        # 6487: :SOUR:VOLT:STAT ON (common)
         self.write(":SOUR:VOLT:STAT ON")
 
     def output_off(self):
         self.write(":SOUR:VOLT:STAT OFF")
 
     def set_nplc(self, nplc: float):
-        # current measurement integration
         self.write(f":SENS:CURR:NPLC {nplc}")
 
     def source_voltage(self, v: float):
         self.write(f":SOUR:VOLT {v}")
 
     def measure_current(self) -> float:
-        # MEAS:CURR? typically returns current
         return float(self.query(":MEAS:CURR?").strip())
+
 
 # ---------------------------- Worker thread ----------------------------
 
@@ -218,7 +203,6 @@ class Runner(QtCore.QThread):
                     self.point_acquired.emit(row)
 
                 try:
-                    # -------------------- Modes --------------------
                     if self.cfg.mode == "IV_SWEEP":
                         # source V, measure I
                         if self.cfg.instrument == "2450":
@@ -226,10 +210,10 @@ class Runner(QtCore.QThread):
                             inst.source_voltage_measure_current(0.0, self.cfg.compliance, self.cfg.autorange)
                             inst.output_on()
                             v = self.cfg.start
-                            # inclusive sweep with step sign handling
                             step = self.cfg.step if (self.cfg.stop >= self.cfg.start) else -abs(self.cfg.step)
                             while (v <= self.cfg.stop + 1e-12) if step > 0 else (v >= self.cfg.stop - 1e-12):
-                                if self._stop: break
+                                if self._stop:
+                                    break
                                 inst.source_voltage_measure_current(v, self.cfg.compliance, self.cfg.autorange)
                                 time.sleep(self.cfg.dwell_s)
                                 i_meas = inst.measure_current()
@@ -242,7 +226,8 @@ class Runner(QtCore.QThread):
                             v = self.cfg.start
                             step = self.cfg.step if (self.cfg.stop >= self.cfg.start) else -abs(self.cfg.step)
                             while (v <= self.cfg.stop + 1e-12) if step > 0 else (v >= self.cfg.stop - 1e-12):
-                                if self._stop: break
+                                if self._stop:
+                                    break
                                 inst.source_voltage(v)
                                 time.sleep(self.cfg.dwell_s)
                                 i_meas = inst.measure_current()
@@ -259,7 +244,8 @@ class Runner(QtCore.QThread):
                         i = self.cfg.start
                         step = self.cfg.step if (self.cfg.stop >= self.cfg.start) else -abs(self.cfg.step)
                         while (i <= self.cfg.stop + 1e-12) if step > 0 else (i >= self.cfg.stop - 1e-12):
-                            if self._stop: break
+                            if self._stop:
+                                break
                             inst.source_current_measure_voltage(i, self.cfg.compliance, self.cfg.autorange)
                             time.sleep(self.cfg.dwell_s)
                             v_meas = inst.measure_voltage()
@@ -267,41 +253,57 @@ class Runner(QtCore.QThread):
                             i += step
 
                     elif self.cfg.mode == "HOLD_V":
-                        # hold V, log I
+                        # hold V, log I (duration_s <= 0 => until Stop)
                         if self.cfg.instrument == "2450":
                             inst.set_nplc_current(self.cfg.nplc)
                             inst.source_voltage_measure_current(self.cfg.start, self.cfg.compliance, self.cfg.autorange)
                             inst.output_on()
-                            t_end = time.time() + self.cfg.duration_s
-                            while time.time() < t_end:
-                                if self._stop: break
-                                time.sleep(self.cfg.sample_period_s)
-                                i_meas = inst.measure_current()
-                                emit_and_write(self.cfg.start, i_meas)
+                            if self.cfg.duration_s <= 0:
+                                while not self._stop:
+                                    time.sleep(self.cfg.sample_period_s)
+                                    i_meas = inst.measure_current()
+                                    emit_and_write(self.cfg.start, i_meas)
+                            else:
+                                t_end = time.time() + self.cfg.duration_s
+                                while time.time() < t_end and not self._stop:
+                                    time.sleep(self.cfg.sample_period_s)
+                                    i_meas = inst.measure_current()
+                                    emit_and_write(self.cfg.start, i_meas)
                         else:
                             inst.set_nplc(self.cfg.nplc)
                             inst.source_voltage(self.cfg.start)
                             inst.output_on()
-                            t_end = time.time() + self.cfg.duration_s
-                            while time.time() < t_end:
-                                if self._stop: break
-                                time.sleep(self.cfg.sample_period_s)
-                                i_meas = inst.measure_current()
-                                emit_and_write(self.cfg.start, i_meas)
+                            if self.cfg.duration_s <= 0:
+                                while not self._stop:
+                                    time.sleep(self.cfg.sample_period_s)
+                                    i_meas = inst.measure_current()
+                                    emit_and_write(self.cfg.start, i_meas)
+                            else:
+                                t_end = time.time() + self.cfg.duration_s
+                                while time.time() < t_end and not self._stop:
+                                    time.sleep(self.cfg.sample_period_s)
+                                    i_meas = inst.measure_current()
+                                    emit_and_write(self.cfg.start, i_meas)
 
                     elif self.cfg.mode == "HOLD_I":
-                        # hold I, log V (2450 only)
+                        # hold I, log V (2450 only) (duration_s <= 0 => until Stop)
                         if self.cfg.instrument != "2450":
                             raise RuntimeError("Hold current is only supported on the 2450.")
                         inst.set_nplc_voltage(self.cfg.nplc)
                         inst.source_current_measure_voltage(self.cfg.start, self.cfg.compliance, self.cfg.autorange)
                         inst.output_on()
-                        t_end = time.time() + self.cfg.duration_s
-                        while time.time() < t_end:
-                            if self._stop: break
-                            time.sleep(self.cfg.sample_period_s)
-                            v_meas = inst.measure_voltage()
-                            emit_and_write(self.cfg.start, v_meas)
+                        if self.cfg.duration_s <= 0:
+                            while not self._stop:
+                                time.sleep(self.cfg.sample_period_s)
+                                v_meas = inst.measure_voltage()
+                                emit_and_write(self.cfg.start, v_meas)
+                        else:
+                            t_end = time.time() + self.cfg.duration_s
+                            while time.time() < t_end and not self._stop:
+                                time.sleep(self.cfg.sample_period_s)
+                                v_meas = inst.measure_voltage()
+                                emit_and_write(self.cfg.start, v_meas)
+
                     else:
                         raise RuntimeError(f"Unknown mode: {self.cfg.mode}")
 
@@ -315,21 +317,27 @@ class Runner(QtCore.QThread):
         except Exception as e:
             self.finished_err.emit(str(e))
 
+
 # ---------------------------- UI ----------------------------
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Keithley Mini (2450 + 6487) — GPIB")
-        self.resize(980, 560)
+        self.resize(1150, 650)
 
         self.runner = None
 
-        # Widgets
+        # Data buffers for plot
+        self.rows: list[dict] = []
+        self.x_data: list[float] = []
+        self.y_data: list[float] = []
+
         w = QtWidgets.QWidget()
         self.setCentralWidget(w)
         layout = QtWidgets.QGridLayout(w)
 
+        # ---------------- Widgets ----------------
         self.inst_combo = QtWidgets.QComboBox()
         self.inst_combo.addItems(["2450", "6487"])
         self.inst_combo.currentTextChanged.connect(self.on_instrument_changed)
@@ -340,28 +348,56 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["IV_SWEEP", "VI_SWEEP", "HOLD_V", "HOLD_I"])
+        self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
 
-        # Params
+        # Live plot axis selection
+        self.xaxis_combo = QtWidgets.QComboBox()
+        self.yaxis_combo = QtWidgets.QComboBox()
+        axis_options = [
+            ("Auto", "AUTO"),
+            ("Time (s)", "elapsed_s"),
+            ("Set value", "set_value"),
+            ("Measured value", "measured_value"),
+        ]
+        for label, key in axis_options:
+            self.xaxis_combo.addItem(label, key)
+            self.yaxis_combo.addItem(label, key)
+        self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+        self.xaxis_combo.currentIndexChanged.connect(self.replot_from_rows)
+        self.yaxis_combo.currentIndexChanged.connect(self.replot_from_rows)
+
+        # Inputs
+        self.start_label = QtWidgets.QLabel("Start (V or A)")
+        self.stop_label = QtWidgets.QLabel("Stop (V or A)")
+        self.step_label = QtWidgets.QLabel("Step (V or A)")
+        self.dwell_label = QtWidgets.QLabel("Dwell per point (s)")
+
         self.start_edit = QtWidgets.QDoubleSpinBox(); self.start_edit.setRange(-1e6, 1e6); self.start_edit.setDecimals(6)
         self.stop_edit  = QtWidgets.QDoubleSpinBox(); self.stop_edit.setRange(-1e6, 1e6);  self.stop_edit.setDecimals(6)
         self.step_edit  = QtWidgets.QDoubleSpinBox(); self.step_edit.setRange(1e-12, 1e6);  self.step_edit.setDecimals(12); self.step_edit.setValue(0.5)
         self.dwell_edit = QtWidgets.QDoubleSpinBox(); self.dwell_edit.setRange(0, 3600); self.dwell_edit.setDecimals(3); self.dwell_edit.setValue(0.2)
 
-        self.duration_edit = QtWidgets.QDoubleSpinBox(); self.duration_edit.setRange(0, 1e7); self.duration_edit.setDecimals(3); self.duration_edit.setValue(5.0)
+        self.duration_label = QtWidgets.QLabel("Hold duration (s) (0 = until Stop)")
+        self.sample_label = QtWidgets.QLabel("Sample period (s)")
+
+        self.duration_edit = QtWidgets.QDoubleSpinBox(); self.duration_edit.setRange(0, 1e7); self.duration_edit.setDecimals(3); self.duration_edit.setValue(0.0)
         self.sample_edit   = QtWidgets.QDoubleSpinBox(); self.sample_edit.setRange(0.001, 3600); self.sample_edit.setDecimals(3); self.sample_edit.setValue(0.2)
 
+        self.comp_label = QtWidgets.QLabel("Compliance (A for V-source / V for I-source)")
         self.comp_edit = QtWidgets.QDoubleSpinBox(); self.comp_edit.setRange(0, 1e6); self.comp_edit.setDecimals(12); self.comp_edit.setValue(1e-6)
+
+        self.nplc_label = QtWidgets.QLabel("NPLC")
         self.nplc_edit = QtWidgets.QDoubleSpinBox(); self.nplc_edit.setRange(0.001, 50.0); self.nplc_edit.setDecimals(3); self.nplc_edit.setValue(1.0)
 
         self.autorange_chk = QtWidgets.QCheckBox("Auto-range")
         self.autorange_chk.setChecked(True)
 
-        # Save path
+        # Save
         self.save_dir_edit = QtWidgets.QLineEdit(str(Path.cwd() / "runs"))
         self.browse_btn = QtWidgets.QPushButton("Browse…")
         self.browse_btn.clicked.connect(self.browse_dir)
 
-        # Control buttons
+        # Control
         self.run_btn = QtWidgets.QPushButton("Run")
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.setEnabled(False)
@@ -377,7 +413,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
 
-        # Layout
+        # Plot
+        self.plot = pg.PlotWidget()
+        self.plot.showGrid(x=True, y=True)
+        self.curve = self.plot.plot([], [], symbol='o')
+
+        # ---------------- Layout ----------------
         row = 0
         layout.addWidget(QtWidgets.QLabel("Instrument"), row, 0)
         layout.addWidget(self.inst_combo, row, 1)
@@ -390,27 +431,33 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.mode_combo, row, 1)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Start (V or A)"), row, 0)
+        layout.addWidget(QtWidgets.QLabel("Live plot X"), row, 0)
+        layout.addWidget(self.xaxis_combo, row, 1)
+        layout.addWidget(QtWidgets.QLabel("Live plot Y"), row, 2)
+        layout.addWidget(self.yaxis_combo, row, 3)
+
+        row += 1
+        layout.addWidget(self.start_label, row, 0)
         layout.addWidget(self.start_edit, row, 1)
-        layout.addWidget(QtWidgets.QLabel("Stop (V or A)"), row, 2)
+        layout.addWidget(self.stop_label, row, 2)
         layout.addWidget(self.stop_edit, row, 3)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Step (V or A)"), row, 0)
+        layout.addWidget(self.step_label, row, 0)
         layout.addWidget(self.step_edit, row, 1)
-        layout.addWidget(QtWidgets.QLabel("Dwell per point (s)"), row, 2)
+        layout.addWidget(self.dwell_label, row, 2)
         layout.addWidget(self.dwell_edit, row, 3)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Hold duration (s)"), row, 0)
+        layout.addWidget(self.duration_label, row, 0)
         layout.addWidget(self.duration_edit, row, 1)
-        layout.addWidget(QtWidgets.QLabel("Sample period (s)"), row, 2)
+        layout.addWidget(self.sample_label, row, 2)
         layout.addWidget(self.sample_edit, row, 3)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Compliance (A for V-source / V for I-source)"), row, 0)
+        layout.addWidget(self.comp_label, row, 0)
         layout.addWidget(self.comp_edit, row, 1)
-        layout.addWidget(QtWidgets.QLabel("NPLC"), row, 2)
+        layout.addWidget(self.nplc_label, row, 2)
         layout.addWidget(self.nplc_edit, row, 3)
         layout.addWidget(self.autorange_chk, row, 4)
 
@@ -427,30 +474,34 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.status, row, 0, 1, 5)
 
         row += 1
-        layout.addWidget(self.table, row, 0, 1, 5)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.plot)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, row, 0, 1, 5)
 
         # Defaults
         self.scan_resources()
         self.set_default_resources()
         self.on_instrument_changed(self.inst_combo.currentText())
+        self.on_mode_changed(self.mode_combo.currentText())
+
+    # ---------------- UI behaviour ----------------
 
     def set_default_resources(self):
-        # Preload your known addresses if present
-        resources = [self.resource_combo.itemText(i) for i in range(self.resource_combo.count())]
         preferred_2450 = "GPIB0::13::INSTR"
         preferred_6487 = "GPIB0::22::INSTR"
-        if preferred_2450 in resources or preferred_6487 in resources:
-            pass  # keep scan results
-        else:
-            # If scan didn't return, still allow manual selection by inserting them
-            self.resource_combo.addItem("GPIB0::13::INSTR")
-            self.resource_combo.addItem("GPIB0::22::INSTR")
+        resources = [self.resource_combo.itemText(i) for i in range(self.resource_combo.count())]
+        if preferred_2450 not in resources:
+            self.resource_combo.addItem(preferred_2450)
+        if preferred_6487 not in resources:
+            self.resource_combo.addItem(preferred_6487)
 
     def scan_resources(self):
         self.resource_combo.clear()
         try:
             res = visa_list_resources()
-            # Keep only likely relevant ones first, but still list all
             gpib = [r for r in res if "GPIB" in r]
             other = [r for r in res if "GPIB" not in r]
             for r in gpib + other:
@@ -465,9 +516,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.save_dir_edit.setText(d)
 
     def on_instrument_changed(self, inst: str):
-        # Enable/disable modes for 6487
+        # Disable unsupported modes on 6487
         if inst == "6487":
-            # disable VI_SWEEP and HOLD_I
             for i in range(self.mode_combo.count()):
                 text = self.mode_combo.itemText(i)
                 enabled = text not in ("VI_SWEEP", "HOLD_I")
@@ -477,6 +527,111 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             for i in range(self.mode_combo.count()):
                 self.mode_combo.model().item(i).setEnabled(True)
+
+    def on_mode_changed(self, mode: str):
+        # Adjust labels and which controls are relevant
+        is_hold = mode in ("HOLD_V", "HOLD_I")
+        is_vi = mode == "VI_SWEEP"
+
+        if mode == "HOLD_V":
+            self.start_label.setText("Set voltage (V)")
+        elif mode == "HOLD_I":
+            self.start_label.setText("Set current (A)")
+        elif mode == "VI_SWEEP":
+            self.start_label.setText("Start current (A)")
+        else:
+            self.start_label.setText("Start voltage (V)")
+
+        if is_vi:
+            self.stop_label.setText("Stop current (A)")
+            self.step_label.setText("Step current (A)")
+        elif mode == "HOLD_I":
+            self.stop_label.setText("(unused)")
+            self.step_label.setText("(unused)")
+        else:
+            self.stop_label.setText("Stop voltage (V)")
+            self.step_label.setText("Step voltage (V)")
+
+        # Show/hide sweep-only controls
+        self.stop_label.setVisible(not is_hold)
+        self.stop_edit.setVisible(not is_hold)
+        self.step_label.setVisible(not is_hold)
+        self.step_edit.setVisible(not is_hold)
+        self.dwell_label.setVisible(not is_hold)
+        self.dwell_edit.setVisible(not is_hold)
+
+        # Show/hide hold-only controls
+        self.duration_label.setVisible(is_hold)
+        self.duration_edit.setVisible(is_hold)
+        self.sample_label.setVisible(is_hold)
+        self.sample_edit.setVisible(is_hold)
+
+        # In HOLD mode, stop/step values are irrelevant
+        if is_hold:
+            self.stop_edit.setValue(0.0)
+
+        # Default plot axes and labels
+        self.set_plot_defaults_for_mode(mode)
+
+    # ---------------- Plot helpers ----------------
+
+    def set_plot_defaults_for_mode(self, mode: str):
+        if mode == "IV_SWEEP":
+            self.xaxis_combo.setCurrentIndex(self.xaxis_combo.findData("set_value"))
+            self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+            self.plot.setLabel("bottom", "Voltage (V)")
+            self.plot.setLabel("left", "Current (A)")
+
+        elif mode == "VI_SWEEP":
+            self.xaxis_combo.setCurrentIndex(self.xaxis_combo.findData("set_value"))
+            self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+            self.plot.setLabel("bottom", "Current (A)")
+            self.plot.setLabel("left", "Voltage (V)")
+
+        elif mode == "HOLD_V":
+            self.xaxis_combo.setCurrentIndex(self.xaxis_combo.findData("elapsed_s"))
+            self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+            self.plot.setLabel("bottom", "Time (s)")
+            self.plot.setLabel("left", "Current (A)")
+
+        elif mode == "HOLD_I":
+            self.xaxis_combo.setCurrentIndex(self.xaxis_combo.findData("elapsed_s"))
+            self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+            self.plot.setLabel("bottom", "Time (s)")
+            self.plot.setLabel("left", "Voltage (V)")
+
+        else:
+            self.xaxis_combo.setCurrentIndex(self.xaxis_combo.findData("set_value"))
+            self.yaxis_combo.setCurrentIndex(self.yaxis_combo.findData("measured_value"))
+
+        self.replot_from_rows()
+
+    def get_xy_from_row(self, row: dict):
+        x_key = self.xaxis_combo.currentData()
+        y_key = self.yaxis_combo.currentData()
+
+        if x_key == "AUTO" or y_key == "AUTO":
+            mode = row.get("mode", "")
+            if mode in ("HOLD_V", "HOLD_I"):
+                x_key = "elapsed_s"
+                y_key = "measured_value"
+            else:
+                x_key = "set_value"
+                y_key = "measured_value"
+
+        return float(row[x_key]), float(row[y_key])
+
+    @QtCore.Slot()
+    def replot_from_rows(self):
+        self.x_data = []
+        self.y_data = []
+        for r in self.rows:
+            x, y = self.get_xy_from_row(r)
+            self.x_data.append(x)
+            self.y_data.append(y)
+        self.curve.setData(self.x_data, self.y_data)
+
+    # ---------------- Run control ----------------
 
     def start_run(self):
         if self.runner is not None:
@@ -501,16 +656,22 @@ class MainWindow(QtWidgets.QMainWindow):
             autorange=bool(self.autorange_chk.isChecked()),
         )
 
-        # Validate
         if mode in ("IV_SWEEP", "VI_SWEEP") and cfg.step <= 0:
             self.status.setText("Step must be > 0 for sweeps.")
             return
 
+        # Reset table + plot buffers
+        self.table.setRowCount(0)
+        self.rows = []
+        self.x_data = []
+        self.y_data = []
+        self.curve.setData([], [])
+        self.set_plot_defaults_for_mode(mode)
+        self.plot.enableAutoRange(True, True)
+
         save_root = Path(self.save_dir_edit.text())
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_folder = save_root / f"{inst}_{mode}_{stamp}"
-
-        self.table.setRowCount(0)
         self.status.setText(f"Running… saving to {run_folder}")
 
         self.runner = Runner(cfg, run_folder)
@@ -536,6 +697,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table.setItem(r, c, QtWidgets.QTableWidgetItem(str(row.get(k, ""))))
         self.table.scrollToBottom()
 
+        self.rows.append(row)
+        x, y = self.get_xy_from_row(row)
+        self.x_data.append(x)
+        self.y_data.append(y)
+        self.curve.setData(self.x_data, self.y_data)
+
     @QtCore.Slot(str)
     def on_done_ok(self, msg: str):
         self.status.setText(msg)
@@ -551,11 +718,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(False)
         self.runner = None
 
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

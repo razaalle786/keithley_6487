@@ -20,14 +20,14 @@ plt.rcParams.update({
 
 # -------- USER: Add your CSV files here --------
 csv_files = [
+    r"IV_sweep_+20V_to_-20V_0.5Vstep_1.0s_hold_2450_20260213_145419_light.csv",
     r"IV_sweep_+20V_to_-20V_0.5Vstep_1.0s_hold_2450_20260213_144930.csv",
-    r"IV_sweep_+20V_to_-2V_0.5Vstep_1.0s_hold_CZT_20260213_142236.csv",
 ]
 
 # Custom legend labels (same order as files above)
 labels = [
-    "2450 Dark",
-    "6487 Dark"
+    "2450 Ligh",
+    "2450 Dark"
 ]
 # -----------------------------------------------
 

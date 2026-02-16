@@ -1,0 +1,14 @@
+{
+  "instrument": "2450",
+  "resource": "GPIB0::13::INSTR",
+  "mode": "VI_SWEEP",
+  "start": 1e-06,
+  "stop": 1e-06,
+  "step": 1e-10,
+  "dwell_s": 0.2,
+  "duration_s": 0.001,
+  "sample_period_s": 4.2,
+  "compliance": 1e-06,
+  "nplc": 1.0,
+  "autorange": true
+}
