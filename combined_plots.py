@@ -10,11 +10,11 @@ import matplotlib.pyplot as plt
 # ---------------- USER SETTINGS ----------------
 GPIB_ADDR = "GPIB0::22::INSTR"
 
-V_START =  20.0      # volts
-V_STOP  = -20.0      # volts
-V_STEP  = -0.5     # volts (negative because we sweep down)
+V_START =  100.0      # volts
+V_STOP  = -100.0      # volts
+V_STEP  = -5.0     # volts (negative because we sweep down)
 
-HOLD_TIME = 1.0     # seconds
+HOLD_TIME = 0.01     # seconds
 
 # 6487 note: ILIM is quantised; always query back what it actually set.
 CURRENT_LIMIT = 2.5e-5   # 25 µA (safe for CZT; change to 2.5e-4 for 250 µA if needed)
