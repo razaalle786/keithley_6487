@@ -48,3 +48,5 @@ The Mini GUI provides a structured interface for controlling both the Keithley 6
 
 ```bash
 pip install -r keithley_mini_software/requirements.txt
+
+17/02/2026 

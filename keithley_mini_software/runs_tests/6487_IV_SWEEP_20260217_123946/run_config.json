@@ -1,0 +1,15 @@
+{
+  "instrument": "6487",
+  "resource": "GPIB0::22::INSTR",
+  "mode": "IV_SWEEP",
+  "start": -400.0,
+  "stop": 400.0,
+  "step": 2.0,
+  "dwell_s": 5.0,
+  "duration_s": 0.0,
+  "sample_period_s": 0.2,
+  "compliance": 0.0025,
+  "nplc": 1.0,
+  "autorange": true,
+  "source_range_v": 0.0
+}
